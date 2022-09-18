@@ -5,7 +5,10 @@ local fn = vim.fn
 
 local lunajson = require("lunajson")
 
-function read_config()
+Tasks = {}
+
+-- _read_config reads the config file and returns a table
+local function _read_config()
 	local file = io.open("./launch.json", "r")
 	if not file then
 		return nil
@@ -16,12 +19,9 @@ function read_config()
 	return lunajson.decode(content)
 end
 
-local function create_temp_window(b)
-	local buf = b
-
-	if not buf then
-		buf = api.nvim_create_buf(false, false)
-	end
+-- _create_temp_window creates a temporary window and buffer to start a job with termopen
+local function _create_temp_window()
+	local buf = api.nvim_create_buf(false, false)
 
 	local win = api.nvim_open_win(buf, true, {
 		relative = "editor",
@@ -34,79 +34,97 @@ local function create_temp_window(b)
 	return buf, win
 end
 
-local function start_job(cmd, cwd, b)
-	local buf, win = create_temp_window(b)
-	local job = fn.termopen(cmd, {
-		stdout_buffered = false,
-		detached = false,
-		cwd = cwd,
-		on_exit = function(_, code, _)
-			print("Job exited with code " .. code)
-		end,
-	})
-	api.nvim_win_close(win, true)
-	Jobs[cmd] = {
-		buf = buf,
-		job = job,
-		cwd = cwd,
-	}
-	return buf, job
-end
+-- _ui_select_task opens a vim ui select window to select a task
+local function _ui_select_task()
+	local task = nil
 
-Jobs = {}
-
-function M.start_all()
-	for _, launch in ipairs(read_config()) do
-		print("executing", launch["command"])
-		local buf, job = start_job(launch["command"], launch["cwd"], nil)
-	end
-end
-
-local function select_job_from_list()
-	local job = nil
-
-	local all_jobs_keys = {}
-	for k, _ in pairs(Jobs) do
-		table.insert(all_jobs_keys, k)
+	local all_task_keys = {}
+	for k, _ in pairs(Tasks) do
+		table.insert(all_task_keys, k)
 	end
 
-	local cmd = nil
-
-	vim.ui.select(all_jobs_keys, {
-		prompt = "Select job",
+	vim.ui.select(all_task_keys, {
+		prompt = "select task",
 		options = {},
 	}, function(choice)
-		job = Jobs[choice]
-		cmd = choice
+		task = Tasks[choice]
 	end)
 
-	return cmd, job
+	return task
 end
 
-function M.open_window(opts)
-	local _, job = select_job_from_list()
+-- Task meta class
+Task = { command = nil, cwd = nil, mode = "default" }
 
-	local buf = job.buf
-
-	-- open buffer in split
-	api.nvim_command("botright 10split")
-	api.nvim_set_current_buf(buf)
+-- Task:new is the constructor for Task
+function Task:new(o)
+	o = o or {}
+	setmetatable(o, self)
+	self.__index = self
+	self._job = nil
+	self._buf = nil
+	return o
 end
 
-function M.list_jobs()
-	local i = 0
-	for key, job in pairs(Jobs) do
-		print(i, key, job.buf)
-		i = i + 1
+-- Task:run runs the task and puts it into the background
+function Task:start()
+	local buf, win = _create_temp_window()
+	self._buf = buf
+
+	local job = fn.termopen(self.command, {
+		cwd = self.cwd,
+	})
+
+	self._job = job
+
+	api.nvim_win_close(win, true)
+end
+
+function Task:stop()
+	if self._job then
+		api.nvim_buf_delete(self._buf, { force = true })
+		api.nvim_jobstop(self._job)
 	end
 end
 
-function M.restart_job(opts)
-	local cmd, job = select_job_from_list()
+function Task:restart()
+	self:stop()
+	self:start()
+end
 
-	fn.jobstop(job.job)
+function Task:open()
+	if self.mode == "vsplit" then
+		api.nvim_command("vsplit")
+	else
+		api.nvim_command("botright 10split")
+	end
 
-	local b, j = start_job(cmd, job.cwd, nil)
+	print(self)
+	api.nvim_set_current_buf(self._buf)
+end
+
+function M.start_all()
+	for _, task in ipairs(_read_config()) do
+		local t = Task:new(task)
+		t:start()
+		Tasks[task.command] = t
+
+		for k, v in pairs(t) do
+			print(k, v)
+		end
+	end
+end
+
+function M.open_task(opts)
+	local task = _ui_select_task()
+
+	task:open()
+end
+
+function M.restart_task(opts)
+	local task = _ui_select_task()
+
+	task:restart()
 end
 
 return M
